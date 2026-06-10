@@ -1,8 +1,9 @@
 """
-怪兽的微信 AI 助手 — Jett
+怪兽的微信 AI 助手 — Jett（带记忆版）
 企业微信 + DeepSeek
 """
-import os, hashlib, base64, struct, socket, time, json
+import os, hashlib, base64, struct, socket, time, json, threading
+from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -14,7 +15,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="怪兽的 AI 助手", version="1.0")
+app = FastAPI(title="怪兽的 AI 助手", version="2.0")
+
+# 数据目录
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
 
 # ========== 配置 ==========
 CORP_ID = os.getenv("WECHAT_CORP_ID", "")
@@ -44,6 +49,35 @@ SYSTEM_PROMPT = """你是 Jett，怪兽最好的学习伙伴和朋友。
 - 怪兽心情不好的时候要安慰他，给他加油
 
 记住：你是怪兽最好的学习伙伴！"""
+
+# ========== 对话记忆系统 ==========
+MAX_HISTORY = 20  # 每个用户最多保存多少条消息
+_memory_lock = threading.Lock()
+
+
+def _memory_file(uid: str) -> Path:
+    """每个用户的记忆文件"""
+    return DATA_DIR / f"{uid}.json"
+
+
+def load_memory(uid: str) -> list:
+    """加载用户的对话历史"""
+    f = _memory_file(uid)
+    if f.exists():
+        try:
+            with open(f, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except Exception:
+            return []
+    return []
+
+
+def save_memory(uid: str, history: list):
+    """保存用户的对话历史"""
+    with _memory_lock:
+        trimmed = history[-MAX_HISTORY:]  # 只保留最近 N 条
+        with open(_memory_file(uid), "w", encoding="utf-8") as f:
+            json.dump(trimmed, f, ensure_ascii=False, indent=2)
 
 
 # ========== 企业微信消息加解密 ==========
@@ -162,7 +196,7 @@ async def msg(rs: Request):
     print(f"[{t}] {uid}: {txt}")
 
     if t == "text" and txt:
-        reply = await ai(txt)
+        reply = await ai(txt, uid)
         reply_xml = f"""<xml>
 <ToUserName><![CDATA[{uid}]]></ToUserName>
 <FromUserName><![CDATA[{to}]]></FromUserName>
@@ -189,24 +223,36 @@ async def msg(rs: Request):
 
 # ========== AI 对话 ==========
 
-async def ai(msg: str) -> str:
-    """发给 AI"""
+async def ai(msg: str, uid: str = "unknown") -> str:
+    """发给 AI，带记忆！"""
+    # 加载这个用户的历史对话
+    history = load_memory(uid)
+
+    # 构建消息列表：系统提示 + 历史 + 当前消息
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": msg})
+
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(
                 AI_API_URL,
                 json={
                     "model": AI_MODEL,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": msg},
-                    ],
+                    "messages": messages,
                     "temperature": 0.7,
                     "max_tokens": 1000,
                 },
                 headers={"Authorization": f"Bearer {AI_API_KEY}"},
             )
-            return r.json()["choices"][0]["message"]["content"]
+            reply = r.json()["choices"][0]["message"]["content"]
+
+            # 保存到记忆
+            history.append({"role": "user", "content": msg})
+            history.append({"role": "assistant", "content": reply})
+            save_memory(uid, history)
+
+            return reply
     except Exception as e:
         print(f"[AI 挂了] {e}")
         return "怪兽，我脑子有点短路了...等等我！"
