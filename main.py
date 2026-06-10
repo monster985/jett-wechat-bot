@@ -2,7 +2,7 @@
 怪兽的微信 AI 助手 — Jett（带记忆版）
 企业微信 + DeepSeek
 """
-import os, hashlib, base64, struct, socket, time, json, threading
+import os, hashlib, base64, struct, socket, time, json, threading, re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -217,7 +217,7 @@ async def verify(
 
 @app.post("/wechat")
 async def msg(rs: Request):
-    """接收消息"""
+    """接收消息 — 支持私聊和群聊"""
     body = await rs.body()
 
     if crypt:
@@ -232,15 +232,28 @@ async def msg(rs: Request):
         xml = ET.fromstring(body)
 
     t = xml.findtext("MsgType", "")
-    uid = xml.findtext("FromUserName", "")
-    txt = xml.findtext("Content", "")
-    to = xml.findtext("ToUserName", "")
+    uid = xml.findtext("FromUserName", "")        # 发消息的人
+    txt = xml.findtext("Content", "")              # 消息内容
+    to = xml.findtext("ToUserName", "")            # 接收者（应用ID）
     nonce = xml.findtext("Nonce", str(int(time.time())))
+    chat_type = xml.findtext("ChatType", "single") # single 或 group
+    chat_id = xml.findtext("ChatId", "")            # 群聊 ID（群聊时有值）
 
-    print(f"[{t}] {uid}: {txt}")
+    # 群聊中 @机器人 消息会带名字，去掉它
+    if chat_type == "group" and txt:
+        import re
+        txt = re.sub(r'@\S+\s*', '', txt).strip()
+
+    # 记忆 ID：群聊用群ID（共享记忆），私聊用用户ID
+    memory_id = chat_id if chat_type == "group" and chat_id else uid
+
+    location = f"群聊({chat_id})" if chat_type == "group" else "私聊"
+    print(f"[{location}] {uid}: {txt}")
 
     if t == "text" and txt:
-        reply = await ai(txt, uid)
+        reply = await ai(txt, memory_id)
+
+        # 群聊回复需要带上 ChatId
         reply_xml = f"""<xml>
 <ToUserName><![CDATA[{uid}]]></ToUserName>
 <FromUserName><![CDATA[{to}]]></FromUserName>
