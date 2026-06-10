@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 need.txt
 skills-lock.json
+data/
 
 .vercel
